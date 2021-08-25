@@ -20,7 +20,7 @@ BrightDB 设计之初就考虑到让它很容易地集成到任何现有的服�
 - 基于事务变化日志的连续回档，可以将部分甚至全体数据回滚到任意一个时刻点。
 - 基于事务的BI分析。由于日志精确包含所有变化，BI更容易分析玩家的所有操作数据。
 - 支持服务器状态日志与监控，方便实时了解节点内部状态。
-- 支持 c#, java, go 三种主流服务器语言（考虑到安全性，只支持这种内存的语言）
+- 支持 c#, java, go 三种主流服务器语言（考虑到安全性，只支持这种内存安全的语言）
 ### benchmark
 
     不单独对缓存测试（缓存命中情况下实在太快了，没有测试必要），只测试事务性能。
@@ -43,7 +43,8 @@ BrightDB 设计之初就考虑到让它很容易地集成到任何现有的服�
 
 ## 使用展示
 
-- kv 范式
+### kv 范式
+
 ```c#
     var storage = new KVCoherenceStorage(...);
     var ctx = new PlayerContext(1001);
@@ -53,11 +54,12 @@ BrightDB 设计之初就考虑到让它很容易地集成到任何现有的服�
         var json = JSON.Decode(value);
         Console.WriteLine("name:{0}", json["name"]);
         // 给客户端回复一条消息
-        ctx.Notify(new UserInfo() { Name=(string)json["name"], Level=(int)json["level"], Exp=(int)json["exp"]});
+        ctx.Notify(new UserInfo() { Name=(string)json["name"], Level=(int)json["level"],});
     }
 ```
 
-- k-object 范式
+### k-object 范式
+
 ```c#
     var storage = new KVCoherenceStorage(...);
     var userTable = new ObjectStorage<long, User>(storage, "user.TbUser");
@@ -71,18 +73,42 @@ BrightDB 设计之初就考虑到让它很容易地集成到任何现有的服�
     }
 ```
 
-- distribution transaction k-object 范式
+### distribution transaction k-object 范式
+
+#### 示例1： 从队伍中踢除第一个成员
+
+
 ```c#
     var storage = new KVCoherenceStorage(...);
     var userTable = new DistributedTransactionManager(storage, ...);
 
+    // 对任意一些数据的操作，在任意节点执行，甚至并发执行，都能得到正确的结果。
+    // 演示一个队长踢除队伍第一个成员的操作（未仔细检查边界条件，请忽略这些细节）。
+    ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
+    {
+        // bright db事务的锁粒度为行（即表中一个记录）
+        // 以下访问记录的顺序为 user1, team, user2。
+        // 如果基于悲观锁实现的数据库，是有潜在死锁风险的。
+        // 而bright db能保证不死锁，并且在激烈冲突的情况下也能2次以内完成事务(优秀!!!!!!)
+        db.User user = await db.user.TbUser.GetAsync(1001);
+        db.Team team = await db.team.TbTeam.GetAsync(user.TeamId);
+        long kickedUserId = team.Members[0].UserId;
+        // 队列中移除第一个成员
+        team.Members.RemoveAt(0);
+        db.User kickedUser = await db.user.TbUser.GetAsync(kickedUserId);
+        // 被踢除的角色,设置队伍id=0
+        kickedUser.TeamId = 0;
+        return true;
+    });
+```
+
+#### 示例2： 两个节点，同时执行给角色1001的经验+1。最终结果为角色经验+2
+
+```c#
     ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
     {
         db.User user = await db.user.TbUser.GetAsync(1001);
-        Console.WriteLine("name:{0}", user.Name);
-        user.Exp += 5;
-        // 给客户端回复一条消息
-        ctx.Notify(new UserInfo() { Name=user.Name, Level=user.Level, Exp=user.Exp});
+        user.Exp += 1;
         return true;
     });
 ```
