@@ -1,46 +1,71 @@
 # BrightDB
 
+核心设计目标为 游戏系统功能高性能无状态化的解决方案，性能超出常规的 无状态服务器+redis 一个量级。
+
 ## 使用展示
 
-### kv 范式
+### 两个节点，同时执行给角色1001的经验+1。最终结果为角色经验+2
 
 ```c#
-    var storage = new KVCoherenceStorage(...);
-    var ctx = new PlayerContext(1001);
-    using(var rec = storage.AcquireAsync("user.User", "1001"))
+    ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
     {
-        ReadOnlyMemory<byte> value = rec.Value;
-        var json = JSON.Decode(value);
-        Console.WriteLine("name:{0}", json["name"]);
-        // 给客户端回复一条消息
-        ctx.Notify(new UserInfo() { Name=(string)json["name"], Level=(int)json["level"],});
-    }
+        db.User user = await db.user.TbUser.GetAsync(1001);
+        user.Exp += 1;
+        return true;
+    });
 ```
 
-### k-object 范式
+
+### 角色1001 送100元宝给角色1002
 
 ```c#
-    var storage = new KVCoherenceStorage(...);
-    var userTable = new ObjectStorage<long, User>(storage, "user.TbUser");
-    var ctx = new PlayerContext(1001);
-    using(var rec = userTable.AcquireAsync(1001))
+    ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
     {
-        User user = rec.Value;
-        Console.WriteLine("name:{0}", user.Name);
-        // 给客户端回复一条消息
-        ctx.Notify(new UserInfo() { Name=user.Name, Level=user.Level, Exp=user.Exp});
-    }
+        db.User user1 = await db.user.TbUser.GetAsync(1001);
+        user1.Gold -= 100;
+        db.User user2 = await db.user.TbUser.GetAsync(1002);
+        user2.Gold += 100;
+        return true;
+    });
 ```
 
-### distribution transaction k-object 范式
-
-#### 示例1： 从队伍中踢除第一个成员
+### 角色1002与1002结成情侣，消耗角色1001 100元宝
 
 
 ```c#
-    var storage = new KVCoherenceStorage(...);
-    var userTable = new DistributedTransactionManager(storage, ...);
+    ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
+    {
+        db.User user1 = await db.user.TbUser.GetAsync(1001);
+        if (user1.Gold < 100)
+        {
+            ctx.ResponseError(ErrorCode.GOLD_NOT_ENOUGH);
+            return false;
+        }
+        // 注意，虽然此处先扣了钱，如果后续检查符合条件，导致事务失败，则会自动回滚。
+        // 很多情况下有极大的便利性，减轻程序员心智负担。
+        user1.Gold -= 100;
+        
+        db.Lover lover1 = await db.sns.TbLover.GetAsync(1001);
+        if (lover1.LoverId != 0)
+        {
+            ctx.ResponseError(ErrorCode.YOU_HAVE_LOVER);
+            return false;
+        }
+        db.Lover lover2 = await db.sns.TbLover.GetAsync(1002);
+        if (lover2.LoverId != 0)
+        {            
+            ctx.ResponseError(ErrorCode.PEER_HAVE_LOVER);
+            return false;
+        }
+        lover1.LoverId = 1002;
+        lover2.LoverId = 1001;
+        return true;
+    });
+```
 
+### 从队伍中踢除第一个成员
+
+```c#
     // 对任意一些数据的操作，在任意节点执行，甚至并发执行，都能得到正确的结果。
     // 演示一个队长踢除队伍第一个成员的操作（未仔细检查边界条件，请忽略这些细节）。
     ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
@@ -61,16 +86,7 @@
     });
 ```
 
-#### 示例2： 两个节点，同时执行给角色1001的经验+1。最终结果为角色经验+2
 
-```c#
-    ProcedureUtil.RunTransactionAsync((PlayerTxnContext ctx) =>
-    {
-        db.User user = await db.user.TbUser.GetAsync(1001);
-        user.Exp += 1;
-        return true;
-    });
-```
 
 ## 支持与联系
     
